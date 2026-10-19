@@ -22,7 +22,7 @@
 
   <h2 style="text-align: center; margin: 5px 0 15px;">🎙️ 議事録レコーダー</h2>
 
-  <!-- 設定エリア -->
+  <!-- 会議・端末設定 -->
   <div class="card">
     <label><strong>会議名・案件名:</strong></label>
     <input type="text" id="meetingName" placeholder="例: 定例ミーティング">
@@ -53,10 +53,10 @@
     let targetGasUrl = "";
     let authToken = "";
 
-    // まとめ送信用バッファ
     let textBuffer = [];
     let silenceTimer = null;
 
+    // 起動時のURLパラメータ取得と初期化
     window.onload = function() {
       const urlParams = new URLSearchParams(window.location.search);
       const qGas = urlParams.get('gas');
@@ -79,7 +79,7 @@
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert("非対応ブラウザです。ChromeまたはSafariをご利用ください。");
+      alert("非対応ブラウザです。iPhoneはSafari、Android・PCはGoogle Chromeをご利用ください。");
     } else {
       recognition = new SpeechRecognition();
       recognition.lang = 'ja-JP';
@@ -98,7 +98,7 @@
           // バッファに蓄積
           textBuffer.push(transcript);
 
-          // 無音3秒判定（3秒発言が途切れたらまとめて送信）
+          // 無音3秒判定（3秒発言が途切れたら文章をまとめて送信）
           clearTimeout(silenceTimer);
           silenceTimer = setTimeout(() => {
             flushBuffer();
@@ -146,7 +146,7 @@
 
     async function toggleRecording() {
       if (!targetGasUrl) {
-        alert("接続先シートが未設定です。QRコードを読み直してください。");
+        alert("接続先シートが未設定です。シートのQRコードを再度読み取ってください。");
         return;
       }
       try {
@@ -162,7 +162,7 @@
         document.getElementById('status').innerHTML = "<span style='color:green;'>● 録音中...</span>";
         document.getElementById('log').textContent = "";
       } catch(e) {
-        alert("マイクが許可されませんでした。");
+        alert("マイクの使用が許可されませんでした。");
       }
     }
 
