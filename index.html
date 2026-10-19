@@ -6,58 +6,68 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 15px; max-width: 500px; margin: auto; background: #f4f6f8; }
-    .card { border-radius: 12px; padding: 16px; margin-bottom: 15px; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
-    button { padding: 16px; font-size: 18px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; transition: 0.2s; }
+    .card { border-radius: 12px; padding: 16px; margin-bottom: 12px; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
+    button { padding: 14px; font-size: 16px; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; transition: 0.2s; margin-top: 5px; }
     .btn-start { background-color: #28a745; color: white; }
+    .btn-pause { background-color: #ffc107; color: #333; }
     .btn-stop { background-color: #dc3545; color: white; }
-    input[type="text"] { width: 100%; padding: 12px; box-sizing: border-box; margin-top: 6px; font-size: 16px; border: 1px solid #ccc; border-radius: 6px; }
-    #status { margin-top: 12px; font-weight: bold; font-size: 16px; text-align: center; }
-    #log { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 6px; height: 180px; overflow-y: auto; padding: 10px; margin-top: 10px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; }
-    .config-label { font-size: 12px; color: #666; margin-top: 8px; display: block; }
+    input[type="text"] { width: 100%; padding: 10px; box-sizing: border-box; margin-top: 4px; font-size: 15px; border: 1px solid #ccc; border-radius: 6px; }
+    #status { margin-top: 10px; font-weight: bold; font-size: 15px; text-align: center; }
+    #log { background: #fafafa; border: 1px solid #e1e4e8; border-radius: 6px; height: 160px; overflow-y: auto; padding: 10px; margin-top: 8px; white-space: pre-wrap; font-size: 14px; line-height: 1.5; }
+    .btn-group { display: flex; gap: 8px; }
+    .btn-group button { flex: 1; }
   </style>
 </head>
 <body>
 
-  <h2 style="text-align: center; margin-top: 5px;">🎙️ 議事録レコーダー</h2>
+  <h2 style="text-align: center; margin: 5px 0 15px;">🎙️ 議事録レコーダー</h2>
 
-  <!-- 端末・接続設定 -->
+  <!-- 設定エリア -->
   <div class="card">
-    <label><strong>端末名（この端末の識別名）:</strong></label>
-    <input type="text" id="deviceName" placeholder="例: 大阪第1会議室、山田スマホ">
-    
-    <small class="config-label">※接続先シート（QR読み取りで自動設定）:</small>
-    <input type="text" id="gasUrlInput" style="font-size: 11px; padding: 6px; background: #eee;" readonly>
+    <label><strong>会議名・案件名:</strong></label>
+    <input type="text" id="meetingName" placeholder="例: 定例ミーティング">
+
+    <label style="margin-top: 10px; display:block;"><strong>端末名（発言者）:</strong></label>
+    <input type="text" id="deviceName" placeholder="例: 会議室マイク、山田">
   </div>
 
   <!-- 操作部 -->
   <div class="card">
     <button id="recordBtn" class="btn-start" onclick="toggleRecording()">録音開始</button>
+    <div id="controlGroup" class="btn-group" style="display: none;">
+      <button id="pauseBtn" class="btn-pause" onclick="togglePause()">一時停止</button>
+      <button class="btn-stop" onclick="stopRecording()">終了・保存</button>
+    </div>
+
     <div id="status">待機中</div>
     
-    <label style="margin-top: 15px; display:block; font-size: 14px;"><strong>認識プレビュー:</strong></label>
+    <label style="margin-top: 12px; display:block; font-size: 13px;"><strong>リアルタイム認識:</strong></label>
     <div id="log">話した内容がここに表示されます...</div>
   </div>
 
   <script>
     let recognition;
     let isRecording = false;
+    let isPaused = false;
     let wakeLock = null;
+    let targetGasUrl = "";
+    let authToken = "";
 
-    // 起動時の初期化
+    // まとめ送信用バッファ
+    let textBuffer = [];
+    let silenceTimer = null;
+
     window.onload = function() {
-      // QRコードに含まれるパラメータ（?gas=...）から接続先URLを取得
       const urlParams = new URLSearchParams(window.location.search);
-      const queryGasUrl = urlParams.get('gas');
+      const qGas = urlParams.get('gas');
+      const qToken = urlParams.get('token');
 
-      if (queryGasUrl) {
-        localStorage.setItem('target_gas_url', queryGasUrl);
-        document.getElementById('gasUrlInput').value = queryGasUrl;
-      } else {
-        const savedUrl = localStorage.getItem('target_gas_url');
-        if (savedUrl) document.getElementById('gasUrlInput').value = savedUrl;
-      }
+      if (qGas) localStorage.setItem('target_gas_url', qGas);
+      if (qToken) localStorage.setItem('auth_token', qToken);
 
-      // 端末名の復元
+      targetGasUrl = localStorage.getItem('target_gas_url') || "";
+      authToken = localStorage.getItem('auth_token') || "";
+
       const savedDevice = localStorage.getItem('meeting_device_name');
       if (savedDevice) document.getElementById('deviceName').value = savedDevice;
     };
@@ -66,11 +76,10 @@
       localStorage.setItem('meeting_device_name', e.target.value);
     });
 
-    // 音声認識（Web Speech API）
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert("非対応ブラウザです。iPhoneはSafari、Android・PCはGoogle Chromeをご利用ください。");
+      alert("非対応ブラウザです。ChromeまたはSafariをご利用ください。");
     } else {
       recognition = new SpeechRecognition();
       recognition.lang = 'ja-JP';
@@ -78,94 +87,113 @@
       recognition.interimResults = false;
 
       recognition.onresult = function(event) {
-        const lastResultIndex = event.results.length - 1;
-        const transcript = event.results[lastResultIndex][0].transcript.trim();
+        if (isPaused) return;
 
+        const transcript = event.results[event.results.length - 1][0].transcript.trim();
         if (transcript.length > 0) {
           const logDiv = document.getElementById('log');
-          logDiv.textContent += transcript + "\n";
+          logDiv.textContent += transcript + " ";
           logDiv.scrollTop = logDiv.scrollHeight;
 
-          sendToSpreadsheet(transcript);
+          // バッファに蓄積
+          textBuffer.push(transcript);
+
+          // 無音3秒判定（3秒発言が途切れたらまとめて送信）
+          clearTimeout(silenceTimer);
+          silenceTimer = setTimeout(() => {
+            flushBuffer();
+          }, 3000);
         }
       };
 
-      recognition.onerror = function(event) {
-        if (event.error !== 'no-speech') console.log("Notice:", event.error);
-      };
-
-      // 無音等で切断されても録音中フラグがあれば自動再接続
       recognition.onend = function() {
-        if (isRecording) {
+        if (isRecording && !isPaused) {
           setTimeout(() => {
-            try { if (isRecording) recognition.start(); } catch(e){}
+            try { if (isRecording && !isPaused) recognition.start(); } catch(e){}
           }, 200);
         }
       };
     }
 
-    // スプレッドシート送信処理
-    function sendToSpreadsheet(text) {
-      const targetUrl = document.getElementById('gasUrlInput').value.trim();
-      const deviceName = document.getElementById('deviceName').value || '未設定端末';
+    // まとめて送信する処理
+    function flushBuffer() {
+      if (textBuffer.length === 0) return;
+      const combinedText = textBuffer.join('、');
+      textBuffer = [];
+
+      const meeting = document.getElementById('meetingName').value || '通常会議';
+      const device = document.getElementById('deviceName').value || '未設定端末';
       const status = document.getElementById('status');
 
-      if (!targetUrl) {
-        status.innerHTML = "<span style='color:red;'>接続先シートが未設定です</span>";
-        return;
-      }
-
-      fetch(targetUrl, {
+      fetch(targetGasUrl, {
         method: "POST",
         mode: "no-cors",
         headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({ deviceName: deviceName, text: text })
+        body: JSON.stringify({
+          token: authToken,
+          meetingName: meeting,
+          deviceName: device,
+          text: combinedText
+        })
       })
       .then(() => {
-        status.innerHTML = "<span style='color:green;'>● 録音中（SS記録完了）</span>";
+        status.innerHTML = "<span style='color:green;'>● 録音中（SS記録済）</span>";
       })
-      .catch((err) => {
+      .catch(() => {
         status.innerHTML = "<span style='color:red;'>● SS記録失敗</span>";
       });
     }
 
-    // 録音開始・停止
     async function toggleRecording() {
-      const btn = document.getElementById('recordBtn');
-      const status = document.getElementById('status');
-      const targetUrl = document.getElementById('gasUrlInput').value.trim();
-
-      if (!isRecording) {
-        if (!targetUrl) {
-          alert("スプレッドシートの接続情報がありません。シートのQRコードを再度読み取ってください。");
-          return;
-        }
-
-        try {
-          await navigator.mediaDevices.getUserMedia({ audio: true });
-
-          // スマホの画面消灯（スリープ）を防止
-          if ('wakeLock' in navigator) {
-            try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
-          }
-
-          recognition.start();
-          isRecording = true;
-          btn.className = "btn-stop";
-          btn.innerText = "録音停止";
-          status.innerHTML = "<span style='color:green;'>● 録音中...</span>";
-          document.getElementById('log').textContent = "";
-        } catch(e) {
-          alert("マイクの使用が許可されませんでした。");
-        }
-      } else {
-        isRecording = false;
-        recognition.stop();
-        if (wakeLock) { wakeLock.release(); wakeLock = null; }
-        btn.className = "btn-start";
-        btn.innerText = "録音開始";
-        status.innerText = "停止中";
+      if (!targetGasUrl) {
+        alert("接続先シートが未設定です。QRコードを読み直してください。");
+        return;
       }
+      try {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+        if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+
+        recognition.start();
+        isRecording = true;
+        isPaused = false;
+
+        document.getElementById('recordBtn').style.display = 'none';
+        document.getElementById('controlGroup').style.display = 'flex';
+        document.getElementById('status').innerHTML = "<span style='color:green;'>● 録音中...</span>";
+        document.getElementById('log').textContent = "";
+      } catch(e) {
+        alert("マイクが許可されませんでした。");
+      }
+    }
+
+    function togglePause() {
+      const btn = document.getElementById('pauseBtn');
+      if (!isPaused) {
+        isPaused = true;
+        recognition.stop();
+        flushBuffer();
+        btn.innerText = "再開";
+        btn.className = "btn-start";
+        document.getElementById('status').innerText = "⏸️ 一時停止中";
+      } else {
+        isPaused = false;
+        recognition.start();
+        btn.innerText = "一時停止";
+        btn.className = "btn-pause";
+        document.getElementById('status').innerHTML = "<span style='color:green;'>● 録音中...</span>";
+      }
+    }
+
+    function stopRecording() {
+      isRecording = false;
+      isPaused = false;
+      recognition.stop();
+      flushBuffer();
+      if (wakeLock) { wakeLock.release(); wakeLock = null; }
+
+      document.getElementById('controlGroup').style.display = 'none';
+      document.getElementById('recordBtn').style.display = 'block';
+      document.getElementById('status').innerText = "停止中（保存完了）";
     }
   </script>
 </body>
