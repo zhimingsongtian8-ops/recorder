@@ -19,9 +19,10 @@
     .btn-group button { flex: 1; }
     .guidance { font-size: 12px; color: #666; margin-top: 5px; line-height: 1.4; }
 
-    /* 音量レベルメーター */
-    .meter-container { height: 8px; background: #e9ecef; border-radius: 4px; overflow: hidden; margin-top: 12px; }
-    .meter-bar { height: 100%; width: 0%; background: #28a745; transition: width 0.1s ease; }
+    /* 録音中インジケーター（マイク競合を起こさないCSSアニメーション） */
+    .pulse-container { display: flex; justify-content: center; align-items: center; height: 20px; margin-top: 10px; }
+    .pulse-dot { width: 12px; height: 12px; background-color: #ccc; border-radius: 50%; transition: 0.3s; }
+    .pulse-dot.active { background-color: #28a745; transform: scale(1.3); box-shadow: 0 0 8px rgba(40,167,69,0.6); }
   </style>
 </head>
 <body>
@@ -46,9 +47,9 @@
       <button class="btn-stop" onclick="stopRecording()">マイク停止</button>
     </div>
 
-    <!-- 音声入力レベルメーター -->
-    <div class="meter-container">
-      <div id="meterBar" class="meter-bar"></div>
+    <!-- 録音動作可視化インジケーター -->
+    <div class="pulse-container">
+      <div id="pulseDot" class="pulse-dot"></div>
     </div>
 
     <div id="status">待機中</div>
@@ -58,25 +59,18 @@
   </div>
 
   <script>
-    let recognition;
+    let recognition = null;
     let isRecording = false;
     let isPaused = false;
     let wakeLock = null;
     let targetGasUrl = "";
     let authToken = "";
 
-    // 高度バッファ ＆ キュー
+    // バッファ ＆ タイマー
     let textBuffer = [];
     let silenceTimer = null;
-    let watchdogTimer = null;
     let heartbeatTimer = null;
-    let pendingRetryQueue = []; // オフライン再送キュー
-
-    // オーディオメーター用
-    let audioContext = null;
-    let analyser = null;
-    let microphoneStream = null;
-    let animFrameId = null;
+    let pendingRetryQueue = [];
 
     window.onload = function() {
       const urlParams = new URLSearchParams(window.location.search);
@@ -107,7 +101,7 @@
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
-      alert("非対応ブラウザです。iPhoneはSafari、Android・PCはChromeをご利用ください。");
+      alert("非対応ブラウザです。iPhoneはSafari、Android・PCはGoogle Chromeをご利用ください。");
     } else {
       setupSpeechRecognition();
     }
@@ -121,32 +115,53 @@
       recognition.onresult = function(event) {
         if (isPaused) return;
 
-        const transcript = event.results[event.results.length - 1][0].transcript.trim();
-        if (transcript.length > 0) {
-          const logDiv = document.getElementById('log');
-          logDiv.textContent += transcript + " ";
-          logDiv.scrollTop = logDiv.scrollHeight;
+        // 認識発火を視覚的に通知
+        const dot = document.getElementById('pulseDot');
+        dot.classList.add('active');
+        setTimeout(() => dot.classList.remove('active'), 500);
 
-          textBuffer.push(transcript);
+        const currentResult = event.results[event.results.length - 1];
+        if (currentResult && currentResult[0]) {
+          const transcript = currentResult[0].transcript.trim();
+          if (transcript.length > 0) {
+            const logDiv = document.getElementById('log');
+            logDiv.textContent += transcript + " ";
+            logDiv.scrollTop = logDiv.scrollHeight;
 
-          // 無音2.5秒でまとめ送信
-          clearTimeout(silenceTimer);
-          silenceTimer = setTimeout(() => {
-            flushBuffer();
-          }, 2500);
+            textBuffer.push(transcript);
+
+            clearTimeout(silenceTimer);
+            silenceTimer = setTimeout(() => {
+              flushBuffer();
+            }, 2500);
+          }
+        }
+      };
+
+      recognition.onerror = function(event) {
+        console.warn("音声認識イベントエラー:", event.error);
+        if (event.error === 'not-allowed') {
+          alert("マイクの使用が拒否されています。ブラウザ設定でマイクを許可してください。");
+          stopRecording();
         }
       };
 
       recognition.onend = function() {
         if (isRecording && !isPaused) {
+          // Android Chromeのセッション遮断対策: 300ms待機後に再接続
           setTimeout(() => {
-            try { if (isRecording && !isPaused) recognition.start(); } catch(e){}
-          }, 150);
+            if (isRecording && !isPaused) {
+              try {
+                recognition.start();
+              } catch(e) {
+                console.error("再接続待機中:", e);
+              }
+            }
+          }, 300);
         }
       };
     }
 
-    // ★【精度向上】文末をインテリジェントに判定して自然な日本語に結合
     function formatIntelligentSentence(words) {
       return words.map(w => {
         w = w.trim();
@@ -157,7 +172,6 @@
       }).join('').replace(/、$/, '。');
     }
 
-    // スプレッドシート送信 ＆ 再送キュー処理
     function flushBuffer() {
       if (textBuffer.length === 0 && pendingRetryQueue.length === 0) return;
 
@@ -167,7 +181,6 @@
         textBuffer = [];
       }
 
-      // 未送信キューがあれば合体
       if (pendingRetryQueue.length > 0) {
         combinedText = pendingRetryQueue.join(' ') + ' ' + combinedText;
         pendingRetryQueue = [];
@@ -193,13 +206,11 @@
         status.innerHTML = "<span style='color:green;'>● 録音中（送信完了）</span>";
       })
       .catch((err) => {
-        // オフライン・失敗時はキューに退避して次回自動再送
         pendingRetryQueue.push(combinedText);
-        status.innerHTML = "<span style='color:orange;'>● 一時保存中（電波復旧時に再送）</span>";
+        status.innerHTML = "<span style='color:orange;'>● 一時保存中（再送待ち）</span>";
       });
     }
 
-    // 定期生存信号（ハートビート：25秒おき）
     function sendHeartbeat() {
       if (!isRecording || isPaused) return;
       const user = document.getElementById('userName').value || '匿名参加者';
@@ -215,53 +226,8 @@
         })
       }).catch(()=>{});
 
-      // 溜まっている再送キューがあればついでに送信
       if (pendingRetryQueue.length > 0) {
         flushBuffer();
-      }
-    }
-
-    // ★【動作安定】番犬タイマー（iOS等のサイレントフリーズを検知して強制復帰）
-    function startWatchdog() {
-      watchdogTimer = setInterval(() => {
-        if (isRecording && !isPaused) {
-          try {
-            recognition.start();
-          } catch(e) {
-            // すでに動いていれば何もしない
-          }
-        }
-      }, 4000);
-    }
-
-    // ★【視覚的安心】マイク入力レベルメーター
-    async function startAudioMeter(stream) {
-      try {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        const source = audioContext.createMediaStreamSource(stream);
-        source.connect(analyser);
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-        const meterBar = document.getElementById('meterBar');
-
-        function updateMeter() {
-          if (!isRecording) {
-            meterBar.style.width = '0%';
-            return;
-          }
-          analyser.getByteFrequencyData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-          let average = sum / dataArray.length;
-          let percent = Math.min(100, Math.max(0, (average - 10) * 2));
-          meterBar.style.width = percent + '%';
-          animFrameId = requestAnimationFrame(updateMeter);
-        }
-        updateMeter();
-      } catch(e) {
-        console.log("AudioMeter Error:", e);
       }
     }
 
@@ -277,24 +243,25 @@
       }
 
       try {
-        microphoneStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen');
+        if ('wakeLock' in navigator) {
+          wakeLock = await navigator.wakeLock.request('screen').catch(()=>{});
+        }
 
-        recognition.start();
         isRecording = true;
         isPaused = false;
+        recognition.start();
 
-        startAudioMeter(microphoneStream);
-        startWatchdog();
         heartbeatTimer = setInterval(sendHeartbeat, 25000);
-        sendHeartbeat(); // 初回パルス送信
+        sendHeartbeat();
 
         document.getElementById('recordBtn').style.display = 'none';
         document.getElementById('controlGroup').style.display = 'flex';
         document.getElementById('status').innerHTML = "<span style='color:green;'>● 録音中...</span>";
         document.getElementById('log').textContent = "";
+        document.getElementById('pulseDot').classList.add('active');
       } catch(e) {
-        alert("マイクの使用が許可されませんでした。");
+        isRecording = false;
+        alert("音声認識の起動に失敗しました: " + e.message);
       }
     }
 
@@ -307,36 +274,30 @@
         btn.innerText = "再開";
         btn.className = "btn-start";
         document.getElementById('status').innerText = "⏸️ 一時停止中";
-        document.getElementById('meterBar').style.width = '0%';
+        document.getElementById('pulseDot').classList.remove('active');
       } else {
         isPaused = false;
         recognition.start();
         btn.innerText = "一時停止";
         btn.className = "btn-pause";
         document.getElementById('status').innerHTML = "<span style='color:green;'>● 録音中...</span>";
+        document.getElementById('pulseDot').classList.add('active');
       }
     }
 
     function stopRecording() {
       isRecording = false;
       isPaused = false;
-      recognition.stop();
+      if (recognition) recognition.stop();
       flushBuffer();
 
-      if (wakeLock) { wakeLock.release(); wakeLock = null; }
-      if (watchdogTimer) clearInterval(watchdogTimer);
+      if (wakeLock) { wakeLock.release().catch(()=>{}); wakeLock = null; }
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      if (animFrameId) cancelAnimationFrame(animFrameId);
-      if (audioContext) { audioContext.close(); audioContext = null; }
-      if (microphoneStream) {
-        microphoneStream.getTracks().forEach(t => t.stop());
-        microphoneStream = null;
-      }
 
       document.getElementById('controlGroup').style.display = 'none';
       document.getElementById('recordBtn').style.display = 'block';
-      document.getElementById('meterBar').style.width = '0%';
       document.getElementById('status').innerText = "停止中";
+      document.getElementById('pulseDot').classList.remove('active');
     }
   </script>
 </body>
